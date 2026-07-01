@@ -77,7 +77,7 @@ Main outputs include:
 
 The complete analysis is available in:
 
-**📄 GeoDengue.html**
+**📄 GeoDengue_Report.html**
 
 ## Data Sources
 
