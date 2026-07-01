@@ -1,0 +1,378 @@
+---
+title: "GeoDengue: Mapping Dengue Risk Across Niterói Neighborhoods"
+author: "Camila Totti"
+date: "2026-06-18"
+output: html_document
+---
+
+## Executive Summary
+
+Dengue remains one of the main public health challenges in Brazil. Understanding its spatial distribution is essential for prioritizing surveillance actions, allocating resources, and supporting evidence-based decision making.
+
+This project analyzes reported dengue cases in Niterói (Rio de Janeiro, Brazil) during 2024 and estimates the incidence rate per 100,000 inhabitants for each neighborhood.
+
+## Key Deliverables
+
+- Data cleaning and standardization workflow
+- Integration of epidemiological and census datasets
+- Calculation of dengue incidence rates
+- Neighborhood-level spatial analysis
+- Choropleth map highlighting priority areas
+
+------------------------------------------------------------------------
+
+## Business Problem
+
+Public health managers need to identify areas with higher dengue burden in order to:
+
+- Prioritize vector-control actions
+- Optimize field team deployment
+- Improve resource allocation
+- Support epidemiological surveillance
+
+Raw case counts alone may be misleading because neighborhoods have different population sizes.
+
+To address this issue, incidence rates were calculated using population-adjusted indicators.
+
+------------------------------------------------------------------------
+
+## Data Sources
+
+### Dengue Notification Database
+
+Contains reported dengue cases including:
+
+- Notification year
+- Neighborhood information
+- Administrative identifiers
+
+### Population Data
+
+Neighborhood-level population estimates used to calculate incidence rates.
+
+### Administrative Boundaries
+
+Neighborhood boundaries provided in GeoJSON format.
+
+```{r setup, include=FALSE}
+library(tidyr)
+library(dplyr)
+library(readxl)
+library(stringi)
+library(stringr)
+library(sf)
+library(leaflet)
+library(ggplot2)
+
+dengue <- read_excel("Banco_dengue_teste.xlsx")
+census <- read.csv2("censo2217762015942.csv") %>%
+  rename(
+    neighborhood = Bairro,
+    resident_population = Populacao.residente
+  )
+```
+
+------------------------------------------------------------------------
+
+## Methodology
+
+The workflow consisted of four main stages:
+
+### 1. Data Cleaning
+
+The dengue database presented:
+
+- Records from municipalities other than Niterói
+- Missing neighborhood information
+- Inconsistencies in neighborhood names
+
+Examples of corrections applied:
+
+| Original Value | Standardized Value |
+|----------------|--------------------|
+| FATIMA         | BAIRRO DE FATIMA   |
+| PONTA DA AREIA | PONTA D'AREIA      |
+| VICOSO JARDIM  | VICOSO JARDIM      |
+
+Neighborhood names were standardized to ensure compatibility across epidemiological, demographic and spatial datasets.
+
+``` r
+dengue_24 <- dengue %>%
+  filter(NU_ANO == "2024") %>%
+  rename(neighborhood = NM_BAIRRO) %>%           
+  filter(!is.na(neighborhood)) %>%
+  mutate(
+    neighborhood = str_squish(neighborhood),
+    neighborhood = str_to_upper(neighborhood),
+    neighborhood = recode(
+      neighborhood,
+      "FATIMA" = "BAIRRO DE FATIMA",
+      "PONTA DA AREIA" = "PONTA D'AREIA",
+      "VICOSO  JARDIM" = "VICOSO JARDIM"
+    )
+  )
+```
+
+```{r processing, echo=FALSE, message=FALSE, warning=FALSE}
+dengue_24 <- 
+  dengue %>%
+  filter(NU_ANO == "2024") %>%
+  rename(neighborhood = NM_BAIRRO) %>%
+  filter(!is.na(neighborhood)) %>%
+  mutate(
+    neighborhood = str_squish(neighborhood),
+    neighborhood = str_to_upper(neighborhood),
+    neighborhood = recode(
+      neighborhood,
+      "FATIMA" = "BAIRRO DE FATIMA",
+      "PONTA DA AREIA" = "PONTA D'AREIA",
+      "VICOSO  JARDIM" = "VICOSO JARDIM"
+    )
+  ) %>%
+  group_by(neighborhood) %>%
+  summarise(
+     reported_cases = n(),
+    .groups = "drop"
+  )
+
+census <-
+  census %>%
+  filter(neighborhood != "Total") %>%
+  mutate(
+    neighborhood = str_squish(neighborhood),
+    neighborhood = str_to_upper(neighborhood),
+    neighborhood = str_replace_all(neighborhood, "\\\\'", "'")
+  )
+
+dengue_by_neighborhood <-
+  census %>%
+  left_join(
+    dengue_24,
+    by = "neighborhood"
+  ) %>%
+  mutate(
+    reported_cases = coalesce(reported_cases, 0),
+    incidence_per_100k =
+      round(
+        (reported_cases / resident_population) * 100000,
+        2
+      )
+  )
+```
+
+### 2. Case Aggregation
+
+Cases were grouped by neighborhood to estimate the total number of notifications.
+
+### 3. Population Integration
+
+The dengue dataset was joined with census information.
+
+### 4. Incidence Rate Calculation
+
+The incidence rate was calculated as:
+
+$$Incidence = \frac{Reported\ Cases}{Population} \times 100,000$$
+
+------------------------------------------------------------------------
+
+### Spatial Analysis
+
+Neighborhood boundaries were integrated with epidemiological indicators through a spatial join.
+
+```{r spatial_processing, echo=FALSE}
+neighborhoods <- st_read(
+  "Limite_de_Bairros.geojson",
+  quiet = TRUE
+)
+
+neighborhoods <- neighborhoods %>%
+  mutate(
+    neighborhood_std =
+      stri_trans_general(tx_nome, "Latin-ASCII") %>%
+      toupper() %>%
+      str_trim()
+  )
+
+dengue_map <- neighborhoods %>%
+  left_join(
+    dengue_by_neighborhood,
+    by = c(
+      "neighborhood_std" = "neighborhood"
+    )
+  )
+```
+
+------------------------------------------------------------------------
+
+## Results
+
+### Dengue Incidence by Neighborhood
+
+#### Top 5 Neighborhoods by Incidence Rate
+
+```{r top5_plot, echo=FALSE, message=FALSE, warning=FALSE, fig.width=8, fig.height=4}
+library(plotly)
+
+top_n <- 10
+
+df_plot <- dengue_by_neighborhood %>%
+  arrange(desc(incidence_per_100k)) %>%
+  slice_head(n = top_n)
+
+p <- ggplot(df_plot, aes(
+  x = reorder(neighborhood, incidence_per_100k),
+  y = incidence_per_100k,
+  text = paste0(
+    "Neighborhood: ", neighborhood, "<br>",
+    "Incidence: ", round(incidence_per_100k, 1), "<br>",
+    "Cases: ", reported_cases
+  )
+)) +
+  geom_col(fill = "#991766") +
+  coord_flip() +
+  labs(x = NULL, y = NULL) +
+  theme_minimal()
+
+ggplotly(p, tooltip = "text")
+```
+
+Higher incidence rates were concentrated in a subset of neighborhoods, while several areas presented comparatively lower levels of dengue burden.
+
+```{r fig.width=9, fig.height=7, echo=FALSE}
+library(leaflet)
+library(RColorBrewer)
+library(htmltools)
+
+pal <- colorNumeric(
+  palette = colorRampPalette(c("#fdf2c5", "#ff6e27", "#991766", "#331327"))(256),
+  domain = dengue_map$incidence_per_100k,
+  na.color = "transparent"
+)
+
+dengue_map <- dengue_map %>%
+  mutate(
+    incidence_label = ifelse(
+      is.na(incidence_per_100k),
+      paste0(
+        "<b>", tx_nome, "</b><br>",
+        "Incidence: NA<br>",
+        "Cases: ", ifelse(is.na(reported_cases), 0, reported_cases), "<br>",
+        "Population: ", resident_population
+      ),
+      paste0(
+        "<b>", tx_nome, "</b><br>",
+        "Incidence: ", round(incidence_per_100k, 1), " per 100k<br>",
+        "Cases: ", reported_cases, "<br>",
+        "Population: ", resident_population
+      )
+    )
+  )
+
+
+leaflet(dengue_map) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  
+  addPolygons(
+    fillColor = ~pal(incidence_per_100k),
+    fillOpacity = 0.85,
+    color = "white",
+    weight = 1,
+    
+    label = ~lapply(incidence_label, HTML),
+    
+    highlightOptions = highlightOptions(
+      weight = 2,
+      color = "#333",
+      bringToFront = TRUE
+    )
+  ) %>%
+  
+  addLegend(
+  pal = pal,
+  values = dengue_map$incidence_per_100k,
+  title = "Dengue incidence<br>(per 100k)",
+  position = "bottomright",
+  na.label = " "
+) 
+
+```
+
+```{r executive_metrics, echo=FALSE, results='asis'}
+metrics <- dengue_by_neighborhood %>%
+  summarise(
+    neighborhoods = n(),
+    total_cases = sum(reported_cases, na.rm = TRUE),
+    avg_incidence = round(mean(incidence_per_100k, na.rm = TRUE), 1),
+    median_incidence = round(median(incidence_per_100k, na.rm = TRUE), 1),
+    max_incidence = round(max(incidence_per_100k, na.rm = TRUE), 1)
+  )
+
+cat(sprintf('
+<div style="display:flex; flex-wrap:wrap; gap:15px;">
+
+<div style="padding:15px; border-radius:10px; background:#f5f5f5; width:180px;">
+<h4>Neighborhoods</h4>
+<h2>%s</h2>
+<p>Analyzed</p>
+</div>
+
+<div style="padding:15px; border-radius:10px; background:#f5f5f5; width:180px;">
+<h4>Cases</h4>
+<h2>%s</h2>
+<p>Reported</p>
+</div>
+
+<div style="padding:15px; border-radius:10px; background:#f5f5f5; width:180px;">
+<h4>Mean Incidence</h4>
+<h2>%s</h2>
+<p>per 100k</p>
+</div>
+
+<div style="padding:15px; border-radius:10px; background:#f5f5f5; width:180px;">
+<h4>Median Incidence</h4>
+<h2>%s</h2>
+<p>per 100k</p>
+</div>
+
+<div style="padding:15px; border-radius:10px; background:#f5f5f5; width:180px;">
+<h4>Highest Incidence</h4>
+<h2>%s</h2>
+<p>per 100k</p>
+</div>
+
+</div>',
+metrics$neighborhoods,
+format(metrics$total_cases, big.mark = ","),
+metrics$avg_incidence,
+metrics$median_incidence,
+metrics$max_incidence
+))
+
+```
+
+------------------------------------------------------------------------
+
+## Key Findings
+
+- A total of 51 neighborhoods were analyzed across Niterói.
+- Dengue incidence ranged from 0 to 2,991 cases per 100,000 inhabitants, revealing substantial spatial heterogeneity across the municipality.
+- The median incidence rate was 477 cases per 100,000 inhabitants, indicating that half of the neighborhoods experienced incidence rates above this level.
+- The average incidence rate reached 587 cases per 100,000 inhabitants, suggesting that a subset of neighborhoods with very high incidence rates influenced the municipal average.
+- Several neighborhoods exhibited incidence rates significantly above the municipal median, highlighting potential priority areas for surveillance and vector-control interventions.
+
+### Limitations
+
+- One neighborhood ("Vital Brazil") could not be evaluated due to missing population information in the census dataset.
+
+------------------------------------------------------------------------
+
+## Skills Demonstrated
+
+- Data Cleaning and Standardization
+- Data Integration
+- Spatial Data Processing
+- Epidemiological Indicators
+- Interactive Web Mapping
+- Data Visualization
+- Reproducible Analytics using R Markdown
